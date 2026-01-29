@@ -1,7 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 
-export async function createClient() {
+export async function createServerSupabaseClient() {
   const cookieStore = await cookies()
 
   return createServerClient(
@@ -17,9 +17,7 @@ export async function createClient() {
             cookiesToSet.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, options)
             )
-          } catch {
-            // Ignorar errores de escritura en cookies desde Server Components
-          }
+          } catch {}
         },
       },
     }
