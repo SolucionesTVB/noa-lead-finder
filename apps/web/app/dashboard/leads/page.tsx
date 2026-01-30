@@ -1,9 +1,9 @@
-import { createClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient } from '@/lib/supabase/server'
 
 const PAGE_SIZE = 10
 
 async function getLeads(page: number, province: string) {
-  const supabase = createClient()
+  const supabase = await createServerSupabaseClient()
 
   const safePage = page < 1 ? 1 : page
   const from = (safePage - 1) * PAGE_SIZE

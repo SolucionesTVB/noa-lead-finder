@@ -1,7 +1,13 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
-  /* config options here */
-};
+  experimental: {
+    serverActions: {
+      allowedOrigins: ['*'],
+    },
+  },
+  // evitar que el build intente prerender rutas que usan Supabase sin env
+  output: 'standalone',
+}
 
-export default nextConfig;
+export default nextConfig
