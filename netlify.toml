@@ -1,6 +1,7 @@
 [build]
-  command = "cd apps/web && npm run build"
-  publish = "apps/web/.next"
+  base = "apps/web"
+  command = "npm run build"
+  publish = ".next"
 
 [[redirects]]
   from = "/*"
