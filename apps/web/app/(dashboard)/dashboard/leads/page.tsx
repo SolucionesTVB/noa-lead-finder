@@ -29,7 +29,7 @@ export default async function LeadsPage({
 }: {
   searchParams?: SearchParams;
 }) {
-  const supabase = createServerSupabaseClient();
+  const supabase = await createServerSupabaseClient();
 
   const page = safeInt(searchParams?.page, 1);
   const province = (searchParams?.province ?? "").trim();
