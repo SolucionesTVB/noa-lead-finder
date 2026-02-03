@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 const PAGE_SIZE = 10;
 
@@ -29,10 +29,9 @@ export default async function LeadsPage({
 }: {
   searchParams?: SearchParams;
 }) {
-  const supabase = createClient();
+  const supabase = createServerSupabaseClient();
 
   const page = safeInt(searchParams?.page, 1);
-
   const province = (searchParams?.province ?? "").trim();
   const status = (searchParams?.status ?? "").trim();
   const from = (searchParams?.from ?? "").trim();
@@ -49,7 +48,7 @@ export default async function LeadsPage({
   if (province) q = q.eq("province", province);
   if (status) q = q.eq("status", status);
 
-  // fechas: inclusivo desde 00:00:00 y hasta 23:59:59
+  // Fechas inclusivas (desde 00:00:00, hasta 23:59:59)
   if (from) q = q.gte("created_at", `${from}T00:00:00`);
   if (to) q = q.lte("created_at", `${to}T23:59:59`);
 
@@ -71,12 +70,7 @@ export default async function LeadsPage({
   const total = count ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const baseParams = {
-    province,
-    status,
-    from,
-    to,
-  };
+  const baseParams = { province, status, from, to };
 
   const prevHref = keep({ ...baseParams, page: String(Math.max(1, page - 1)) });
   const nextHref = keep({ ...baseParams, page: String(Math.min(totalPages, page + 1)) });
