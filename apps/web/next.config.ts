@@ -6,7 +6,12 @@ const nextConfig: NextConfig = {
       allowedOrigins: ['*'],
     },
   },
-  // evitar que el build intente prerender rutas que usan Supabase sin env
+
+  // Monorepo fix: fuerza a Next/Turbopack a usar ESTE directorio como root
+  turbopack: {
+    root: __dirname,
+  },
+
   output: 'standalone',
 }
 
