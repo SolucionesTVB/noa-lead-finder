@@ -1,401 +1,433 @@
 import Link from "next/link";
-import { headers } from "next/headers";
 import { supabaseAdmin } from "../../../lib/supabase-server";
 
 export const dynamic = "force-dynamic";
 
-type Analysis = {
-  summary: string;
-  quality_score: number; // 0–100
-  conversion_probability: number; // 0–100
-  reasoning: string;
-  missing_info: string[];
-  next_steps: string[];
-};
+type LeadRow = Record<string, any>;
 
-function clamp(n: number, min = 0, max = 100) {
-  if (!Number.isFinite(n)) return min;
-  return Math.max(min, Math.min(max, n));
+function fmt(v: any) {
+  if (v === null || v === undefined || v === "") return "—";
+  return String(v);
 }
 
-function scoreLabel(quality: number, prob: number) {
-  if (quality >= 70 || prob >= 60) return { label: "Prioridad Alta", tone: "good" as const };
-  if (quality >= 40 || prob >= 25) return { label: "Prioridad Media", tone: "warn" as const };
-  return { label: "Prioridad Baja", tone: "low" as const };
+function statusBadge(status: string | null) {
+  if (status === "CLOSED") return { text: "CLOSED", color: "#d6e4ff", bg: "#10239e", border: "#597ef7" };
+  if (status === "NEGOTIATING") return { text: "NEGOTIATING", color: "#ffd6e7", bg: "#3a1026", border: "#eb2f96" };
+  if (status === "QUOTED") return { text: "QUOTED", color: "#ffe7ba", bg: "#3a2400", border: "#fa8c16" };
+  if (status === "EVALUATING") return { text: "EVALUATING", color: "#fff1b8", bg: "#332b00", border: "#fadb14" };
+  if (status === "INTERESTED") return { text: "INTERESTED", color: "#73d13d", bg: "#102a12", border: "#237b2d" };
+  if (status === "CONTACTED") return { text: "CONTACTED", color: "#ffc53d", bg: "#2b2111", border: "#ad6800" };
+  if (status === "LOST") return { text: "LOST", color: "#ffccc7", bg: "#2a0f0f", border: "#a8071a" };
+  return { text: "NEW", color: "#cbd5e1", bg: "#111827", border: "#334155" };
 }
 
-function isIncomplete(missing: string[]) {
-  const hit = (k: string) => missing.some((m) => m.toLowerCase().includes(k.toLowerCase()));
-  let count = 0;
-  if (hit("nombre")) count++;
-  if (hit("empresa")) count++;
-  if (hit("tel")) count++;
-  if (hit("correo") || hit("email")) count++;
-  return count >= 2;
+function isValidLeadId(v: any) {
+  const s = String(v ?? "").trim();
+  if (!s) return false;
+  if (s === "ID_DEL_LEAD") return false;
+  return s.includes("-");
 }
 
-function badgeStyle(tone: "good" | "warn" | "low") {
-  const base: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "6px 10px",
-    borderRadius: 999,
-    fontWeight: 800,
-    fontSize: 12,
-    border: "1px solid rgba(0,0,0,0.10)",
-    background: "rgba(0,0,0,0.03)",
+function firstName(name: any) {
+  return String(name ?? "").trim().split(" ")[0] || "el contacto";
+}
+
+function cleanTerm(text: any) {
+  const raw = String(text ?? "").trim();
+
+  const map: Record<string, string> = {
+    role_title: "cargo",
+    company: "empresa",
+    district: "distrito",
+    province: "provincia",
+    canton: "cantón",
+    notes: "notas",
+    source_url: "URL de origen",
+    insurance_company: "aseguradora",
+    activity_level: "nivel de actividad",
+    profile_completeness: "completitud del perfil",
+    commercial_intent: "intención comercial",
+    recommended_action: "acción recomendada",
+    has_email: "tiene correo",
+    has_phone: "tiene teléfono",
+    has_whatsapp: "tiene WhatsApp",
+    high: "alto",
+    medium: "medio",
+    low: "bajo",
+    true: "sí",
+    false: "no",
   };
-  if (tone === "good") return { ...base, background: "rgba(0, 128, 0, 0.08)" };
-  if (tone === "warn") return { ...base, background: "rgba(255, 165, 0, 0.12)" };
-  return { ...base, background: "rgba(255, 0, 0, 0.07)" };
+
+  return map[raw] ?? raw.replaceAll("_", " ");
 }
 
-function toDigits(v: any) {
-  return String(v ?? "").replace(/\D+/g, "");
+function cleanInternalText(text: any) {
+  const raw = String(text ?? "").trim();
+  if (!raw) return "Sin resumen disponible.";
+
+  return raw
+    .replaceAll("Vale la pena perseguir este lead.", "Este contacto muestra señales positivas para seguimiento.")
+    .replaceAll("Sí vale la pena perseguir.", "Este contacto muestra señales positivas para seguimiento.")
+    .replaceAll("lead", "contacto")
+    .replaceAll("Lead", "Contacto")
+    .replaceAll("[tu nombre]", "Tony")
+    .replaceAll("CRM", "sistema")
+    .replaceAll("máx", "máximo");
 }
 
-function toE164CR(v: any) {
-  const d = toDigits(v);
-  if (!d) return "";
-  // 506 + 8 dígitos = 11
-  if (d.startsWith("506") && d.length === 11) return `+${d}`;
-  // 8 dígitos local CR
-  if (d.length === 8) return `+506${d}`;
-  // fallback
-  return `+${d}`;
+function getScoreLabel(score: number) {
+  if (score >= 80) return "Alto potencial";
+  if (score >= 50) return "Potencial medio";
+  return "Requiere validación";
 }
 
-function isBadEmail(email: any) {
-  const e = String(email || "").trim().toLowerCase();
-  if (!e) return true;
+function buildCommercialSteps(lead: LeadRow, analysis: any) {
+  const name = firstName(lead.full_name);
+  const phone = lead.whatsapp ?? lead.phone;
+  const status = lead.status;
 
-  // Formato básico
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e)) return true;
-
-  const domain = e.split("@").pop() || "";
-
-  // Dominios "placeholder"
-  const placeholder = new Set([
-    "example.com", "example.org", "example.net",
-    "test.com", "test.org", "test.net",
-    "email.com", "mail.com"
-  ]);
-
-  // Dominios temporales / desechables (lista corta pero efectiva)
-  const disposable = new Set([
-    "mailinator.com", "yopmail.com", "yopmail.fr", "yopmail.net",
-    "guerrillamail.com", "guerrillamail.net",
-    "temp-mail.org", "tempmail.com", "10minutemail.com", "10minutemail.net",
-    "minuteinbox.com", "dispostable.com", "getnada.com", "trashmail.com",
-    "fakeinbox.com", "maildrop.cc"
-  ]);
-
-  if (placeholder.has(domain)) return true;
-  if (disposable.has(domain)) return true;
-
-  // Cualquier dominio "example.*"
-  if (domain.startswith("example.")) return true;
-
-  // Correos demasiado obvios
-  const local = e.split("@")[0] || "";
-  const badLocals = ["test", "testing", "demo", "fake", "correo", "mail", "no-reply", "noreply"];
-  if (badLocals.includes(local)) return true;
-
-  return false;
-}
-
-function btnStyle(kind: "primary" | "ghost") {
-  const base: React.CSSProperties = {
-    borderRadius: 12,
-    padding: "10px 12px",
-    fontWeight: 900,
-    cursor: "pointer",
-    border: "1px solid rgba(0,0,0,0.15)",
-    textDecoration: "none",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-  };
-  if (kind === "primary") return { ...base, background: "rgba(0,0,0,0.92)", color: "white" };
-  return { ...base, background: "white", color: "black" };
-}
-
-async function getBaseUrl() {
-  const h = await headers();
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
-  return host ? `${proto}://${host}` : "";
-}
-
-async function fetchLead(id: string) {
-  const sb = supabaseAdmin();
-  const { data, error } = await sb.from("leads").select("*").eq("id", id).maybeSingle();
-  if (error) throw new Error(`Supabase error: ${error.message}`);
-  if (!data) return null;
-  return data as Record<string, any>;
-}
-
-async function fetchAI(id: string, lead: any) {
-  const base = await getBaseUrl();
-  const url = `${base}/api/leads/${encodeURIComponent(id)}/ai`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      id,
-      // Nivel A: SOLO datos existentes (evita inventos)
-      lead: {
-        full_name: lead?.full_name ?? null,
-        name: lead?.name ?? lead?.nombre ?? null,
-        role: lead?.role ?? lead?.cargo ?? null,
-        company: lead?.company ?? lead?.empresa ?? null,
-        email: lead?.email ?? null,
-        phone: lead?.phone ?? lead?.whatsapp ?? null,
-        whatsapp: lead?.whatsapp ?? null,
-        province: lead?.province ?? lead?.provincia ?? null,
-        canton: lead?.canton ?? null,
-        district: lead?.district ?? null,
-        source: lead?.source ?? lead?.fuente ?? null,
-        notes: lead?.notes ?? lead?.notas ?? null,
-        insurer: lead?.insurer ?? lead?.aseguradora ?? null,
-        updated_at: lead?.updated_at ?? null,
-        created_at: lead?.created_at ?? null,
-      },
-    }),
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`AI endpoint falló (${res.status}). ${txt?.slice(0, 240) ?? ""}`);
+  if (status === "CLOSED") {
+    return [
+      "Registrar el cierre y conservar el historial comercial.",
+      "Dar seguimiento postventa si aplica.",
+      "Revisar si existe oportunidad de referidos o venta cruzada.",
+    ];
   }
 
-  const data = await res.json();
-  return data as { ok: boolean; id: string; analysis: Analysis; version?: string };
+  if (status === "LOST") {
+    return [
+      "Registrar el motivo de pérdida.",
+      "No seguir insistiendo salvo que exista una nueva señal de interés.",
+      "Conservar el aprendizaje para mejorar futuros contactos.",
+    ];
+  }
+
+  if (status === "NEGOTIATING") {
+    return [
+      "Confirmar cuál es el principal punto de decisión.",
+      "Responder objeciones con información concreta.",
+      "Definir una próxima acción con fecha clara.",
+    ];
+  }
+
+  if (status === "QUOTED") {
+    return [
+      "Confirmar recepción de la cotización.",
+      "Preguntar si hay dudas sobre cobertura, precio o condiciones.",
+      "Mover a negociación si empieza a comparar o pedir ajustes.",
+    ];
+  }
+
+  if (status === "EVALUATING") {
+    return [
+      "Entender qué opción está comparando.",
+      "Aclarar necesidades principales antes de empujar una venta.",
+      "Si ya hay suficiente información, pasar a cotización.",
+    ];
+  }
+
+  if (status === "INTERESTED") {
+    return [
+      `Contactar a ${name} con tono consultivo, sin presión.`,
+      "Validar qué necesita resolver realmente.",
+      "Si confirma interés concreto, mover a evaluación.",
+    ];
+  }
+
+  if (status === "CONTACTED") {
+    return [
+      "Esperar respuesta y dar seguimiento si no hay avance.",
+      "Si responde con interés real, mover a interesado.",
+      "Evitar insistir con tono de venta; abrir conversación útil.",
+    ];
+  }
+
+  const aiSteps = Array.isArray(analysis?.next_steps) ? analysis.next_steps.slice(0, 3) : [];
+
+  if (aiSteps.length > 0) {
+    return aiSteps.map((x: any) => cleanInternalText(x));
+  }
+
+  return [
+    `Contactar a ${name}${phone ? ` por WhatsApp (${phone})` : ""}.`,
+    "Preguntar qué está valorando o qué necesita resolver.",
+    "Registrar respuesta y mover el estado según avance real.",
+  ];
 }
 
-export default async function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+export default async function LeadPage(props: any) {
+  const rawParams = await Promise.resolve(props?.params);
+  const id =
+    rawParams?.id ??
+    rawParams?.params?.id ??
+    props?.params?.id ??
+    props?.params?.params?.id ??
+    props?.id ??
+    undefined;
 
-  let lead: Record<string, any> | null = null;
-  let payload: { ok: boolean; id: string; analysis: Analysis; version?: string } | null = null;
-  let errMsg = "";
+  if (!isValidLeadId(id)) {
+    return (
+      <main style={page}>
+        <h1>Lead inválido</h1>
+        <p style={{ color: "#ff4d4f", fontWeight: 800 }}>El ID recibido no es válido.</p>
+        <p style={{ opacity: 0.8 }}>{fmt(id)}</p>
+        <Link href="/leads" style={backLink}>← Volver</Link>
+      </main>
+    );
+  }
 
   try {
-    lead = await fetchLead(id);
+    const sb = supabaseAdmin();
+
+    const { data: lead, error } = await sb
+      .from("leads")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle<LeadRow>();
+
+    if (error) throw new Error(error.message);
+
     if (!lead) {
-      errMsg = `No encontré el lead en Supabase: id = ${id}`;
-    } else {
-      payload = await fetchAI(id, lead);
+      return (
+        <main style={page}>
+          <h1>Lead no encontrado</h1>
+          <p style={{ color: "#ff4d4f" }}>No pude cargar el lead.</p>
+          <Link href="/leads" style={backLink}>← Volver</Link>
+        </main>
+      );
     }
-  } catch (e: any) {
-    const msg = e?.message ?? "Error inesperado";
-    if (String(msg).toLowerCase().includes("aborted") || String(msg).toLowerCase().includes("abort")) {
-      errMsg = "NOA está analizando (tardó más de lo normal). Recargá en 10–15s.";
-    } else {
-      errMsg = msg;
-    }
-  }
 
-  const analysis = payload?.analysis;
-  const quality = clamp(analysis?.quality_score ?? 0);
-  const prob = clamp(analysis?.conversion_probability ?? 0);
-  const verdict = scoreLabel(quality, prob);
-  const incomplete = analysis ? isIncomplete(analysis.missing_info ?? []) : false;
+    const badge = statusBadge(lead.status ?? null);
+    const analysis = lead.analysis_json ?? null;
 
-  const copyText = analysis
-    ? [
-        `NOA — Lead ${id}`,
-        `Veredicto: ${verdict.label}${incomplete ? " (Incompleto)" : ""}`,
-        `Quality: ${quality}/100 | Prob: ${prob}/100`,
-        payload?.version ? `Versión motor: ${payload.version}` : "",
-        "",
-        `Resumen: ${analysis.summary}`,
-        "",
-        `Por qué: ${analysis.reasoning}`,
-        "",
-        `Faltantes:`,
-        ...(analysis.missing_info ?? []).map((x) => `- ${x}`),
-        "",
-        `Acciones de hoy:`,
-        ...(analysis.next_steps ?? []).map((x) => `- ${x}`),
-      ].filter(Boolean).join("\n")
-    : `NOA — Lead ${id}\nNo se pudo generar análisis.\n${errMsg}`;
+    const quality = Number(analysis?.quality_score ?? 0);
+    const probability = Number(analysis?.conversion_probability ?? 0);
 
-  // Links de contacto (no inventa: usa lo que venga del lead)
-  const phoneRaw = lead?.whatsapp ?? lead?.phone ?? "";
-  const phoneE164 = toE164CR(phoneRaw);
-  const wa = phoneE164 ? `https://wa.me/${phoneE164.replace("+", "")}` : "";
-  const callE164 = toE164CR(lead?.phone || lead?.whatsapp);
-  const tel = callE164 ? `tel:${callE164}` : "";
-  const copyValue = String(callE164 || lead?.phone || lead?.whatsapp || "");
+    const scoreLabel = getScoreLabel(quality);
+    const summary = cleanInternalText(analysis?.summary);
+    const nextSteps = buildCommercialSteps(lead, analysis);
+    const missingInfo = Array.isArray(analysis?.missing_info)
+      ? analysis.missing_info.slice(0, 6).map((x: any) => cleanTerm(x))
+      : [];
 
-  const email = lead?.email ?? "";
-  const emailOk = !!email && !isBadEmail(email);
+    return (
+      <main style={page}>
+        <div style={header}>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 34, fontWeight: 950 }}>
+              {fmt(lead.full_name ?? "Lead")}
+            </h1>
 
-  const subject = encodeURIComponent("NOA — Validación rápida de tu solicitud");
-  const body = encodeURIComponent(
-    `Hola ${lead?.full_name ?? ""},\n\nSoy [TU NOMBRE] de NOA. Solo para confirmar: ¿cuál es tu empresa y tu rol?\n\n¿Te sirve una llamada de 10 min hoy o mañana?\n\nPura vida.`
-  );
-  const mail = emailOk ? `mailto:${email}?subject=${subject}&body=${body}` : "";
-
-  return (
-    <main style={{ padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial", maxWidth: 980, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-            <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900 }}>Lead: {id}</h1>
-            {analysis && <span style={badgeStyle(verdict.tone)}>{verdict.label}</span>}
-            {analysis && incomplete && <span style={{ ...badgeStyle("warn"), fontWeight: 900 }}>Incompleto</span>}
-          </div>
-          <p style={{ marginTop: 8, opacity: 0.8 }}>
-            Detalle del Lead (Nivel A): datos existentes + detección de faltantes. Sin scraping activo.
-          </p>
-        </div>
-
-        <Link href="/leads" style={{ textDecoration: "none" }}>
-          <button style={{ border: "1px solid rgba(0,0,0,0.15)", background: "white", padding: "10px 12px", borderRadius: 12, fontWeight: 800, cursor: "pointer" }}>
-            ← Volver
-          </button>
-        </Link>
-      </div>
-
-      {lead && (
-        <section style={{ marginTop: 12, padding: 14, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 10 }}>
-            <div>
-              <div style={{ fontWeight: 950 }}>Acciones rápidas</div>
-              <div style={{ marginTop: 4, fontSize: 12, opacity: 0.75 }}>
-                1 clic para contactar. WhatsApp abre sin texto. Llamar usa teléfono o WhatsApp. Si el correo es “example.com”, no lo usamos.
-              </div>
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.7 }}>
-              Contacto: <b>{lead.full_name ?? "—"}</b>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <a href={wa || "#"} rel="noreferrer" style={btnStyle("primary")} aria-disabled={!wa}>
-              💬 WhatsApp
-            </a>
-
-            <a href={tel || "#"} style={btnStyle("ghost")} aria-disabled={!tel}>
-              📞 Llamar
-            </a>
-
-            <button
-              type="button"
-              style={btnStyle("ghost")}
-              disabled={!copyValue}
-              onClick={async () => {
-                if (!copyValue) return;
-                try {
-                  await navigator.clipboard.writeText(copyValue);
-                } catch (e) {
-                  // si clipboard falla, no rompemos UX
-                }
+            <span
+              style={{
+                display: "inline-flex",
+                marginTop: 10,
+                padding: "7px 12px",
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 950,
+                letterSpacing: "0.04em",
+                color: badge.color,
+                background: badge.bg,
+                border: `1px solid ${badge.border}`,
               }}
             >
-              📋 Copiar número
-            </button>
+              {badge.text}
+            </span>
 
+            <div style={{ marginTop: 8, opacity: 0.55, fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
+              {id}
+            </div>
+          </div>
 
-            {emailOk ? (
-              <a href={mail} style={btnStyle("ghost")}>
-                ✉️ Correo
-              </a>
-            ) : (
-              <span style={{ fontSize: 12, opacity: 0.75, padding: "10px 12px" }}>
-                ✉️ Correo: <b>no usable</b> (example.com)
-              </span>
-            )}
+          <Link href="/leads" style={backLink}>← Volver</Link>
+        </div>
 
-            {!callE164 && (
-              <span style={{ fontSize: 12, opacity: 0.75, padding: "10px 12px" }}>
-                ⚠️ Sin teléfono válido
-              </span>
-            )}
+        <section style={{ ...section, marginTop: 18 }}>
+          <h2 style={sectionTitle}>Mover lead en el embudo</h2>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {[
+              ["CONTACTED", "Contactado"],
+              ["INTERESTED", "Interesado"],
+              ["EVALUATING", "Evaluando"],
+              ["QUOTED", "Cotizado"],
+              ["NEGOTIATING", "Negociando"],
+              ["CLOSED", "Cerrado"],
+              ["LOST", "Perdido"],
+            ].map(([value, label]) => {
+              const b = statusBadge(value);
+
+              return (
+                <form key={value} method="POST" action={`/api/leads/${id}/advance`}>
+                  <input type="hidden" name="to" value={value} />
+                  <button
+                    type="submit"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      border: `1px solid ${b.border}`,
+                      background: b.bg,
+                      color: b.color,
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {label}
+                  </button>
+                </form>
+              );
+            })}
           </div>
         </section>
-      )}
 
-      {!analysis ? (
-        <section style={{ marginTop: 16, padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.12)", background: "rgba(255,0,0,0.04)" }}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 950 }}>No se pudo generar el análisis</h2>
-          <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.85 }}>{errMsg}</p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 14 }}>
+          <section style={section}>
+            <h2 style={sectionTitle}>Contacto</h2>
+            <div style={line}><b>Teléfono:</b> {fmt(lead.phone ?? lead.whatsapp)}</div>
+            <div style={line}><b>WhatsApp:</b> {fmt(lead.whatsapp ?? lead.phone)}</div>
+            <div style={line}><b>Email:</b> {fmt(lead.email)}</div>
+            <div style={line}><b>Fuente:</b> {fmt(lead.source)}</div>
+          </section>
+
+          <section style={section}>
+            <h2 style={sectionTitle}>Ubicación</h2>
+            <div style={line}><b>Provincia:</b> {fmt(lead.province)}</div>
+            <div style={line}><b>Cantón:</b> {fmt(lead.canton)}</div>
+            <div style={line}><b>Distrito:</b> {fmt(lead.district)}</div>
+          </section>
+        </div>
+
+        <section style={{ ...section, marginTop: 14 }}>
+          <h2 style={sectionTitle}>Lectura comercial</h2>
+
+          {analysis ? (
+            <div>
+              <div style={scoreGrid}>
+                <div style={scoreCard}>
+                  <div style={smallLabel}>Potencial</div>
+                  <div style={bigValue}>{scoreLabel}</div>
+                </div>
+
+                <div style={scoreCard}>
+                  <div style={smallLabel}>Calidad</div>
+                  <div style={bigValue}>{quality}/100</div>
+                </div>
+
+                <div style={scoreCard}>
+                  <div style={smallLabel}>Probabilidad</div>
+                  <div style={bigValue}>{probability}/100</div>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 18, lineHeight: 1.7 }}>
+                <b>Resumen ejecutivo:</b>
+                <p style={{ marginTop: 8, opacity: 0.9 }}>{summary}</p>
+              </div>
+
+              <div style={{ marginTop: 18 }}>
+                <b>Qué hacer ahora:</b>
+                <ul style={{ marginTop: 8 }}>
+                  {nextSteps.map((x: any, i: number) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div style={{ marginTop: 18 }}>
+                <b>Información pendiente:</b>
+                <ul style={{ marginTop: 8, opacity: 0.85 }}>
+                  {missingInfo.length > 0 ? (
+                    missingInfo.map((x: any, i: number) => (
+                      <li key={i}>{x}</li>
+                    ))
+                  ) : (
+                    <li>No hay faltantes críticos registrados.</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+          ) : (
+            <p style={{ opacity: 0.7 }}>Sin análisis todavía.</p>
+          )}
         </section>
-      ) : (
-        <>
-          <section style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginTop: 16 }}>
-            <div style={{ padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-              <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7 }}>QUALITY SCORE</div>
-              <div style={{ fontSize: 42, fontWeight: 950, marginTop: 6 }}>{quality}</div>
-              <div style={{ opacity: 0.75 }}>de 100</div>
-            </div>
-            <div style={{ padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-              <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.7 }}>PROBABILIDAD DE CONVERSIÓN</div>
-              <div style={{ fontSize: 42, fontWeight: 950, marginTop: 6 }}>{prob}</div>
-              <div style={{ opacity: 0.75 }}>de 100</div>
-            </div>
-          </section>
 
-          <section style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginTop: 12 }}>
-            <div style={{ padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 950 }}>¿Vale la pena?</h2>
-              <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.85 }}>{analysis.summary}</p>
-            </div>
-            <div style={{ padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 950 }}>¿Por qué?</h2>
-              <p style={{ marginTop: 8, marginBottom: 0, opacity: 0.85 }}>{analysis.reasoning}</p>
-            </div>
-          </section>
-
-          <section style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginTop: 12 }}>
-            <div style={{ padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 950 }}>¿Qué info falta?</h2>
-              <ul style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18, lineHeight: 1.55 }}>
-                {(analysis.missing_info ?? []).map((x, i) => (
-                  <li key={i} style={{ opacity: 0.9 }}>{x}</li>
-                ))}
-              </ul>
-            </div>
-
-            <div style={{ padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 950 }}>¿Qué hacer hoy?</h2>
-              <ol style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18, lineHeight: 1.55 }}>
-                {(analysis.next_steps ?? []).map((x, i) => (
-                  <li key={i} style={{ opacity: 0.9, marginBottom: 6 }}>{x}</li>
-                ))}
-              </ol>
-            </div>
-          </section>
-
-          <section style={{ marginTop: 12, padding: 16, borderRadius: 16, border: "1px solid rgba(0,0,0,0.10)", background: "white" }}>
-            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 950 }}>Resumen para copiar</h2>
-            <textarea
-              readOnly
-              value={copyText}
-              style={{
-                width: "100%",
-                height: 220,
-                marginTop: 10,
-                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                fontSize: 12,
-                lineHeight: 1.45,
-                padding: 12,
-                borderRadius: 12,
-                border: "1px solid rgba(0,0,0,0.12)",
-              }}
-            />
-          </section>
-        </>
-      )}
-
-      <footer style={{ marginTop: 18, paddingTop: 14, opacity: 0.65, fontSize: 12 }}>
-        No somos un software, somos productividad inteligente.
-      </footer>
-    </main>
-  );
+        <footer style={{ marginTop: 20, opacity: 0.6 }}>
+          No somos un software, somos productividad inteligente.
+        </footer>
+      </main>
+    );
+  } catch (e: any) {
+    return (
+      <main style={page}>
+        <p style={{ color: "#ff4d4f", fontWeight: 900 }}>No pude cargar el lead.</p>
+        <p>{e?.message ?? "Error inesperado"}</p>
+        <Link href="/leads" style={backLink}>← Volver</Link>
+      </main>
+    );
+  }
 }
+
+const page: React.CSSProperties = {
+  minHeight: "100vh",
+  background: "#000",
+  color: "#fff",
+  padding: 24,
+  fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
+};
+
+const header: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: 16,
+};
+
+const section: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 16,
+  padding: 18,
+  background: "#111",
+};
+
+const sectionTitle: React.CSSProperties = {
+  marginTop: 0,
+  fontSize: 20,
+  fontWeight: 950,
+};
+
+const line: React.CSSProperties = {
+  marginTop: 8,
+};
+
+const backLink: React.CSSProperties = {
+  color: "#a855f7",
+  fontWeight: 900,
+  textDecoration: "none",
+};
+
+const scoreGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: 12,
+};
+
+const scoreCard: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.10)",
+  borderRadius: 14,
+  padding: 14,
+  background: "#0b0b0b",
+};
+
+const smallLabel: React.CSSProperties = {
+  opacity: 0.65,
+  fontSize: 12,
+  fontWeight: 700,
+  textTransform: "uppercase",
+};
+
+const bigValue: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 22,
+  fontWeight: 950,
+};
