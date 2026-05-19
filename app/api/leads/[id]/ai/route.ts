@@ -187,6 +187,8 @@ Notas:
 - quality_score y conversion_probability SIEMPRE 0–100.
 - next_steps debe sonar como guía para asesorar, no como libreto de venta agresiva.
 - Evitá frases robóticas o de presión.
+- Nunca uses placeholders como "[tu nombre]", "[nombre]", "[asesor]" o similares.
+- Si redactás ejemplos de mensajes, usá siempre "Tony Villalobos" como nombre del asesor.
 `.trim();
 
     const user = `leadFacts (fuente de verdad):\n${JSON.stringify(leadFacts, null, 2)}`;
